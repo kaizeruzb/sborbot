@@ -17,6 +17,12 @@ bot.catch((err) => {
   console.error("Bot error:", err.message ?? err);
 });
 
+// Debug: log every incoming update
+bot.use((ctx, next) => {
+  console.log(`[update] type=${ctx.updateType} chat=${ctx.chat?.id} from=${ctx.from?.username} text=${ctx.message?.text?.slice(0, 50)}`);
+  return next();
+});
+
 // Event handlers (member tracking, /start, photos, callbacks, admin DM text)
 registerHandlers(bot);
 
