@@ -1,6 +1,6 @@
 import { Context, InlineKeyboard } from "grammy";
 import {
-  createCollection, getActiveCollections, getCollectionById,
+  createCollection, getActiveCollection, getActiveCollections, getCollectionById,
   getCollectionStatus, closeCollection, getGroups, getPayment,
   updatePaymentStatus, getClosedCollections, type Collection,
 } from "./db.js";
@@ -208,56 +208,70 @@ export async function handleNewCollect(ctx: Context) {
   await ctx.reply("Выберите группу для сбора:", { reply_markup: kb });
 }
 
-// --- /status ---
+// --- Status text builder (reusable) ---
+
+export function buildStatusText(c: Collection, groupName?: string): string {
+  const { paid, pending, knownUnpaid, unknownUnpaidCount } = getCollectionStatus(c.id);
+  const totalUnpaid = knownUnpaid.length + unknownUnpaidCount;
+
+  const collected = paid.length * c.per_person;
+  const remaining = c.total_amount - collected;
+  const progressTotal = c.member_count || (paid.length + pending.length + totalUnpaid) || 1;
+  const progressFilled = Math.round((paid.length / progressTotal) * 10);
+  const bar = "█".repeat(progressFilled) + "░".repeat(10 - progressFilled);
+
+  let text = `📊 Сбор "${c.title}"`;
+  if (groupName) text += ` (${groupName})`;
+  text += `\n[${bar}] ${paid.length}/${progressTotal}\n`;
+  text += `💵 По ${formatMoney(c.per_person)} на чел.\n`;
+  text += `💰 Собрано: ${formatMoney(collected)} / ${formatMoney(c.total_amount)}`;
+  if (remaining > 0) text += ` (осталось: ${formatMoney(remaining)})`;
+  text += `\n\n`;
+
+  text += `✅ Сдали (${paid.length}):\n`;
+  text += paid.length > 0
+    ? paid.map((m) => `  ${m.first_name}${m.username ? ` (@${m.username})` : ""}`).join("\n")
+    : "  —";
+
+  text += `\n⏳ На проверке (${pending.length}):\n`;
+  text += pending.length > 0
+    ? pending.map((m) => `  ${m.first_name}${m.username ? ` (@${m.username})` : ""}`).join("\n")
+    : "  —";
+
+  text += `\n❌ Не сдали (~${totalUnpaid}):\n`;
+  text += knownUnpaid.length > 0
+    ? knownUnpaid.map((m) => `  ${m.first_name}${m.username ? ` (@${m.username})` : ""}`).join("\n")
+    : "  —";
+  if (unknownUnpaidCount > 0) {
+    text += `\n  ...и ещё ~${unknownUnpaidCount} чел.`;
+  }
+
+  return text;
+}
+
+// --- /status (works in DM for admin AND in groups for everyone) ---
 
 export async function handleStatus(ctx: Context) {
-  if (ctx.chat?.type !== "private" || !isAdmin(ctx)) return;
+  const chatType = ctx.chat?.type;
+
+  // In group: show status for this group's active collection
+  if (chatType === "group" || chatType === "supergroup") {
+    const collection = getActiveCollection(ctx.chat!.id);
+    if (!collection) return ctx.reply("Нет активного сбора в этой группе.");
+    return ctx.reply(buildStatusText(collection));
+  }
+
+  // In DM: admin only, show all active collections
+  if (chatType !== "private" || !isAdmin(ctx)) return;
 
   const collections = getActiveCollections();
-  if (collections.length === 0) {
-    return ctx.reply("Нет активных сборов.");
-  }
+  if (collections.length === 0) return ctx.reply("Нет активных сборов.");
 
   const groups = getGroups();
   const groupMap = new Map(groups.map((g) => [g.group_id, g.title]));
 
   for (const c of collections) {
-    const { paid, pending, knownUnpaid, unknownUnpaidCount } = getCollectionStatus(c.id);
-    const totalUnpaid = knownUnpaid.length + unknownUnpaidCount;
-    const groupName = groupMap.get(c.group_id) || "?";
-
-    const collected = paid.length * c.per_person;
-    const remaining = c.total_amount - collected;
-    const progressTotal = c.member_count || (paid.length + pending.length + totalUnpaid) || 1;
-    const progressFilled = Math.round((paid.length / progressTotal) * 10);
-    const bar = "█".repeat(progressFilled) + "░".repeat(10 - progressFilled);
-
-    let text = `📊 Сбор "${c.title}" (${groupName})\n`;
-    text += `[${bar}] ${paid.length}/${progressTotal}\n`;
-    text += `💵 По ${formatMoney(c.per_person)} на чел.\n`;
-    text += `💰 Собрано: ${formatMoney(collected)} / ${formatMoney(c.total_amount)}`;
-    if (remaining > 0) text += ` (осталось: ${formatMoney(remaining)})`;
-    text += `\n\n`;
-
-    text += `✅ Сдали (${paid.length}):\n`;
-    text += paid.length > 0
-      ? paid.map((m) => `  ${m.first_name}${m.username ? ` (@${m.username})` : ""}`).join("\n")
-      : "  —";
-
-    text += `\n⏳ На проверке (${pending.length}):\n`;
-    text += pending.length > 0
-      ? pending.map((m) => `  ${m.first_name}${m.username ? ` (@${m.username})` : ""}`).join("\n")
-      : "  —";
-
-    text += `\n❌ Не сдали (~${totalUnpaid}):\n`;
-    text += knownUnpaid.length > 0
-      ? knownUnpaid.map((m) => `  ${m.first_name}${m.username ? ` (@${m.username})` : ""}`).join("\n")
-      : "  —";
-    if (unknownUnpaidCount > 0) {
-      text += `\n  ...и ещё ~${unknownUnpaidCount} чел.`;
-    }
-
-    await ctx.reply(text);
+    await ctx.reply(buildStatusText(c, groupMap.get(c.group_id) || "?"));
   }
 }
 

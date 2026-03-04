@@ -1,11 +1,11 @@
 import "dotenv/config";
-import { Bot } from "grammy";
+import { Bot, InlineKeyboard } from "grammy";
 import {
   handleNewCollect, handleStatus, handleRemind,
-  handleClose, handleCancel, handleHistory, formatMoney,
+  handleClose, handleCancel, handleHistory, formatMoney, buildStatusText,
 } from "./commands.js";
 import { registerHandlers } from "./handlers.js";
-import { getActiveCollectionsWithDeadline, getCollectionStatus, closeCollection } from "./db.js";
+import { getActiveCollectionsWithDeadline, getActiveCollections, getCollectionStatus, closeCollection } from "./db.js";
 
 if (!process.env.BOT_TOKEN) {
   throw new Error("BOT_TOKEN is not set in environment");
@@ -16,7 +16,7 @@ const bot = new Bot(process.env.BOT_TOKEN);
 // Event handlers (member tracking, /start, photos, callbacks, admin DM text)
 registerHandlers(bot);
 
-// Admin commands (DM only)
+// Admin commands (DM only, except /status which also works in groups)
 bot.command("newcollect", handleNewCollect);
 bot.command("status", handleStatus);
 bot.command("remind", handleRemind);
@@ -24,13 +24,14 @@ bot.command("close", handleClose);
 bot.command("cancel", handleCancel);
 bot.command("history", handleHistory);
 
-// --- Deadline auto-reminders (every hour) ---
+// --- Hourly: deadline checks + auto-status in groups ---
 
-function checkDeadlines() {
-  const collections = getActiveCollectionsWithDeadline();
+async function hourlyTick() {
   const now = new Date();
 
-  for (const collection of collections) {
+  // Check deadlines
+  const withDeadline = getActiveCollectionsWithDeadline();
+  for (const collection of withDeadline) {
     const deadline = new Date(collection.deadline! + "T23:59:59");
     const hoursLeft = (deadline.getTime() - now.getTime()) / (1000 * 60 * 60);
 
@@ -50,9 +51,25 @@ function checkDeadlines() {
       }
     }
   }
+
+  // Auto-status for all active collections
+  const allActive = getActiveCollections();
+  for (const collection of allActive) {
+    const { paid, pending, knownUnpaid, unknownUnpaidCount } = getCollectionStatus(collection.id);
+    const totalUnpaid = knownUnpaid.length + unknownUnpaidCount;
+    // Only send if there are still unpaid people
+    if (totalUnpaid > 0 || pending.length > 0) {
+      const botInfo = await bot.api.getMe();
+      const kb = new InlineKeyboard().url(
+        "💳 Отправить скрин оплаты",
+        `https://t.me/${botInfo.username}?start=pay_${collection.id}`,
+      );
+      bot.api.sendMessage(collection.group_id, buildStatusText(collection), { reply_markup: kb }).catch(() => {});
+    }
+  }
 }
 
-setInterval(checkDeadlines, 60 * 60 * 1000);
+setInterval(hourlyTick, 60 * 60 * 1000);
 
 bot.start({
   allowed_updates: ["message", "callback_query", "chat_member"],
