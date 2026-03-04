@@ -13,6 +13,10 @@ if (!process.env.BOT_TOKEN) {
 
 const bot = new Bot(process.env.BOT_TOKEN);
 
+bot.catch((err) => {
+  console.error("Bot error:", err.message ?? err);
+});
+
 // Event handlers (member tracking, /start, photos, callbacks, admin DM text)
 registerHandlers(bot);
 
