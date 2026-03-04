@@ -1,8 +1,8 @@
 import { Bot, Context } from "grammy";
 import { ConversationFlavor } from "@grammyjs/conversations";
-import { upsertMember, deactivateMember, getActiveCollection, getCollectionById, addPayment, getPayment } from "./db.js";
+import { upsertMember, deactivateMember, getCollectionById, addPayment, getPayment } from "./db.js";
 
-type MyContext = Context & ConversationFlavor;
+type MyContext = Context & ConversationFlavor<Context>;
 
 // In-memory state: userId -> collectionId they're about to send a screenshot for
 const pendingScreenshots = new Map<number, number>();

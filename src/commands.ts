@@ -11,7 +11,7 @@ import {
   getPayment,
 } from "./db.js";
 
-export type MyContext = Context & ConversationFlavor;
+export type MyContext = Context & ConversationFlavor<Context>;
 export type MyConversation = Conversation<MyContext, MyContext>;
 
 // --- /newcollect conversation ---
