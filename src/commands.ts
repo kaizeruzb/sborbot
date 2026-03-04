@@ -220,27 +220,30 @@ export async function handleStatus(ctx: Context) {
   const groupMap = new Map(groups.map((g) => [g.group_id, g.title]));
 
   for (const c of collections) {
-    const { paid, pending, unpaid } = getCollectionStatus(c.id);
-    const total = paid.length + pending.length + unpaid.length;
+    const { paid, pending, knownUnpaid, unknownUnpaidCount } = getCollectionStatus(c.id);
+    const totalUnpaid = knownUnpaid.length + unknownUnpaidCount;
     const groupName = groupMap.get(c.group_id) || "?";
 
     let text = `📊 Сбор "${c.title}" (${groupName})\n`;
     text += `💵 ${formatMoney(c.per_person)} на чел. | Всего: ${formatMoney(c.total_amount)}\n\n`;
 
-    text += `✅ Сдали (${paid.length}/${total}):\n`;
+    text += `✅ Сдали (${paid.length}):\n`;
     text += paid.length > 0
-      ? paid.map((m) => `  ${m.first_name}`).join("\n")
+      ? paid.map((m) => `  ${m.first_name}${m.username ? ` (@${m.username})` : ""}`).join("\n")
       : "  —";
 
     text += `\n⏳ На проверке (${pending.length}):\n`;
     text += pending.length > 0
-      ? pending.map((m) => `  ${m.first_name}`).join("\n")
+      ? pending.map((m) => `  ${m.first_name}${m.username ? ` (@${m.username})` : ""}`).join("\n")
       : "  —";
 
-    text += `\n❌ Не сдали (${unpaid.length}):\n`;
-    text += unpaid.length > 0
-      ? unpaid.map((m) => `  ${m.first_name}${m.username ? ` (@${m.username})` : ""}`).join("\n")
+    text += `\n❌ Не сдали (~${totalUnpaid}):\n`;
+    text += knownUnpaid.length > 0
+      ? knownUnpaid.map((m) => `  ${m.first_name}${m.username ? ` (@${m.username})` : ""}`).join("\n")
       : "  —";
+    if (unknownUnpaidCount > 0) {
+      text += `\n  ...и ещё ~${unknownUnpaidCount} чел.`;
+    }
 
     await ctx.reply(text);
   }
@@ -266,12 +269,12 @@ export async function handleRemind(ctx: Context) {
 }
 
 export async function sendReminder(ctx: Context, collection: Collection) {
-  const { unpaid } = getCollectionStatus(collection.id);
-  if (unpaid.length === 0) {
+  const { knownUnpaid, unknownUnpaidCount } = getCollectionStatus(collection.id);
+  if (knownUnpaid.length === 0 && unknownUnpaidCount === 0) {
     return ctx.reply(`Все участники сбора "${collection.title}" уже сдали! 🎉`);
   }
 
-  const mentions = unpaid.map((m) => (m.username ? `@${m.username}` : m.first_name)).join(", ");
+  const mentions = knownUnpaid.map((m) => (m.username ? `@${m.username}` : m.first_name)).join(", ");
   const botInfo = await ctx.api.getMe();
   const kb = new InlineKeyboard().url(
     "💳 Отправить скрин оплаты",
@@ -282,7 +285,7 @@ export async function sendReminder(ctx: Context, collection: Collection) {
     `⏰ Напоминание! Ждём оплату от: ${mentions}\n\nСбор: "${collection.title}"\nСумма: ${formatMoney(collection.per_person)}\nРеквизиты: ${collection.details}`,
     { reply_markup: kb },
   );
-  await ctx.reply(`Напоминание отправлено в группу (не сдали: ${unpaid.length}).`);
+  await ctx.reply(`Напоминание отправлено в группу (не сдали: ~${knownUnpaid.length + unknownUnpaidCount}).`);
 }
 
 // --- /close ---
@@ -306,9 +309,9 @@ export async function handleClose(ctx: Context) {
 
 export async function doClose(ctx: Context, collection: Collection) {
   closeCollection(collection.id);
-  const { paid, pending, unpaid } = getCollectionStatus(collection.id);
+  const { paid, pending, knownUnpaid, unknownUnpaidCount } = getCollectionStatus(collection.id);
   await ctx.api.sendMessage(collection.group_id,
-    `Сбор "${collection.title}" закрыт.\n✅ Сдали: ${paid.length} | ⏳ На проверке: ${pending.length} | ❌ Не сдали: ${unpaid.length}`,
+    `Сбор "${collection.title}" закрыт.\n✅ Сдали: ${paid.length} | ⏳ На проверке: ${pending.length} | ❌ Не сдали: ~${knownUnpaid.length + unknownUnpaidCount}`,
   );
   await ctx.reply(`Сбор "${collection.title}" закрыт.`);
 }

@@ -195,27 +195,53 @@ export function updatePaymentStatus(collectionId: number, userId: number, status
   _updatePaymentStatus.run(status, rejectReason ?? null, collectionId, userId, collectionId, userId);
 }
 
-// --- Collection Status (3 categories) ---
+// --- Collection Status (payment-based) ---
+
+// Latest payment per user for a collection
+const _getLatestPayments = db.prepare(`
+  SELECT p.* FROM payments p
+  WHERE p.collection_id = ? AND p.id = (
+    SELECT MAX(p2.id) FROM payments p2
+    WHERE p2.collection_id = p.collection_id AND p2.user_id = p.user_id
+  )
+`);
+
+export type StatusMember = { user_id: number; first_name: string; username: string | null };
 
 export function getCollectionStatus(collectionId: number) {
   const collection = getCollectionById(collectionId);
-  if (!collection) return { paid: [] as Member[], pending: [] as Member[], unpaid: [] as Member[] };
+  if (!collection) return { paid: [] as StatusMember[], pending: [] as StatusMember[], knownUnpaid: [] as StatusMember[], unknownUnpaidCount: 0 };
 
+  const payments = _getLatestPayments.all(collectionId) as Payment[];
   const members = getActiveMembers(collection.group_id);
-  const nonAdmin = members.filter((m) => m.user_id !== collection.admin_id);
+  const memberMap = new Map(members.map((m) => [m.user_id, m]));
 
-  const paid: Member[] = [];
-  const pending: Member[] = [];
-  const unpaid: Member[] = [];
+  const paid: StatusMember[] = [];
+  const pending: StatusMember[] = [];
+  const paidUserIds = new Set<number>();
 
-  for (const m of nonAdmin) {
-    const p = getPayment(collectionId, m.user_id);
-    if (p?.status === "confirmed") paid.push(m);
-    else if (p?.status === "pending") pending.push(m);
-    else unpaid.push(m);
+  for (const p of payments) {
+    if (p.user_id === collection.admin_id) continue;
+    paidUserIds.add(p.user_id);
+    const m = memberMap.get(p.user_id);
+    const entry: StatusMember = {
+      user_id: p.user_id,
+      first_name: m?.first_name ?? `#${p.user_id}`,
+      username: m?.username ?? null,
+    };
+    if (p.status === "confirmed") paid.push(entry);
+    else if (p.status === "pending") pending.push(entry);
   }
 
-  return { paid, pending, unpaid };
+  // Known unpaid: tracked members without any payment
+  const knownUnpaid: StatusMember[] = members
+    .filter((m) => m.user_id !== collection.admin_id && !paidUserIds.has(m.user_id))
+    .map((m) => ({ user_id: m.user_id, first_name: m.first_name, username: m.username }));
+
+  // Estimated unknown unpaid
+  const unknownUnpaidCount = Math.max(0, collection.member_count - paid.length - pending.length - knownUnpaid.length);
+
+  return { paid, pending, knownUnpaid, unknownUnpaidCount };
 }
 
 // --- Find active collections for a user ---

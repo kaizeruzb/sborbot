@@ -2,7 +2,7 @@ import { Bot, Context, InlineKeyboard } from "grammy";
 import {
   upsertMember, deactivateMember, upsertGroup,
   getCollectionById, addPayment, getPayment, updatePaymentStatus,
-  getActiveCollectionsForUser, getCollectionStatus,
+  getActiveCollectionsForUser,
 } from "./db.js";
 import {
   isAdmin, adminFlow, pendingRejects, handleAdminText,

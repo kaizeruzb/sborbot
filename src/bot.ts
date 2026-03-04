@@ -65,14 +65,14 @@ function checkDeadlines() {
 
     if (hoursLeft < 0) {
       closeCollection(collection.id);
-      const { paid, pending, unpaid } = getCollectionStatus(collection.id);
+      const { paid, pending, knownUnpaid, unknownUnpaidCount } = getCollectionStatus(collection.id);
       bot.api.sendMessage(collection.group_id,
-        `⏰ Дедлайн сбора "${collection.title}" прошёл. Сбор закрыт.\n✅ ${paid.length} | ⏳ ${pending.length} | ❌ ${unpaid.length}`,
+        `⏰ Дедлайн сбора "${collection.title}" прошёл. Сбор закрыт.\n✅ ${paid.length} | ⏳ ${pending.length} | ❌ ~${knownUnpaid.length + unknownUnpaidCount}`,
       ).catch(() => {});
     } else if (hoursLeft <= 24) {
-      const { unpaid } = getCollectionStatus(collection.id);
-      if (unpaid.length > 0) {
-        const mentions = unpaid.map((m) => (m.username ? `@${m.username}` : m.first_name)).join(", ");
+      const { knownUnpaid, unknownUnpaidCount } = getCollectionStatus(collection.id);
+      if (knownUnpaid.length + unknownUnpaidCount > 0) {
+        const mentions = knownUnpaid.map((m) => (m.username ? `@${m.username}` : m.first_name)).join(", ");
         bot.api.sendMessage(collection.group_id,
           `⏰ До дедлайна сбора "${collection.title}" меньше суток!\n\nЖдём: ${mentions}\nСумма: ${formatMoney(collection.per_person)}\nРеквизиты: ${collection.details}`,
         ).catch(() => {});
