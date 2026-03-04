@@ -5,8 +5,7 @@ import {
   handleClose, handleCancel, handleHistory, formatMoney,
 } from "./commands.js";
 import { registerHandlers } from "./handlers.js";
-import { getActiveCollectionsWithDeadline, getCollectionStatus, closeCollection, getGroups, getActiveMembers, getActiveCollections, db } from "./db.js";
-import { isAdmin } from "./commands.js";
+import { getActiveCollectionsWithDeadline, getCollectionStatus, closeCollection } from "./db.js";
 
 if (!process.env.BOT_TOKEN) {
   throw new Error("BOT_TOKEN is not set in environment");
@@ -24,35 +23,6 @@ bot.command("remind", handleRemind);
 bot.command("close", handleClose);
 bot.command("cancel", handleCancel);
 bot.command("history", handleHistory);
-
-// Temporary debug command
-bot.command("debug", async (ctx) => {
-  if (ctx.chat?.type !== "private" || !isAdmin(ctx)) return;
-  const groups = getGroups();
-  const collections = getActiveCollections();
-  const payments = db.prepare("SELECT * FROM payments").all() as any[];
-
-  let text = `🔍 DEBUG\n\nGroups (${groups.length}):\n`;
-  for (const g of groups) {
-    const members = getActiveMembers(g.group_id);
-    text += `  ${g.title} [${g.group_id}] — ${members.length} members\n`;
-    for (const m of members) {
-      text += `    ${m.first_name} (@${m.username}) id=${m.user_id}\n`;
-    }
-  }
-
-  text += `\nCollections (${collections.length}):\n`;
-  for (const c of collections) {
-    text += `  #${c.id} "${c.title}" group=${c.group_id} admin=${c.admin_id}\n`;
-  }
-
-  text += `\nPayments (${payments.length}):\n`;
-  for (const p of payments) {
-    text += `  col=${p.collection_id} user=${p.user_id} status=${p.status}\n`;
-  }
-
-  await ctx.reply(text);
-});
 
 // --- Deadline auto-reminders (every hour) ---
 
