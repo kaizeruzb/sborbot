@@ -223,9 +223,10 @@ export function registerHandlers(bot: Bot) {
     await ctx.answerCallbackQuery();
   });
 
-  // --- Admin DM text (state machine) ---
-  bot.on("message:text", async (ctx) => {
-    if (ctx.chat.type !== "private" || !isAdmin(ctx)) return;
-    await handleAdminText(ctx);
+  // --- Admin DM text (state machine) — must call next() if not handled ---
+  bot.on("message:text", async (ctx, next) => {
+    if (ctx.chat.type !== "private" || !isAdmin(ctx)) return next();
+    const handled = await handleAdminText(ctx);
+    if (!handled) return next();
   });
 }
