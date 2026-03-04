@@ -221,7 +221,7 @@ export function getCollectionStatus(collectionId: number) {
   const paidUserIds = new Set<number>();
 
   for (const p of payments) {
-    if (p.user_id === collection.admin_id) continue;
+    // admin participates too — don't filter
     paidUserIds.add(p.user_id);
     const m = memberMap.get(p.user_id);
     const entry: StatusMember = {
@@ -235,7 +235,7 @@ export function getCollectionStatus(collectionId: number) {
 
   // Known unpaid: tracked members without any payment
   const knownUnpaid: StatusMember[] = members
-    .filter((m) => m.user_id !== collection.admin_id && !paidUserIds.has(m.user_id))
+    .filter((m) => !paidUserIds.has(m.user_id))
     .map((m) => ({ user_id: m.user_id, first_name: m.first_name, username: m.username }));
 
   // Estimated unknown unpaid
