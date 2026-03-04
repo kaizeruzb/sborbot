@@ -69,7 +69,7 @@ export function registerHandlers(bot: Bot) {
     }
 
     if (isAdmin(ctx)) {
-      await ctx.reply("Привет! Команды:\n/newcollect — создать сбор\n/status — статус сборов\n/remind — напомнить\n/close — закрыть сбор\n/history — история сборов\n/cancel — отменить действие");
+      await ctx.reply("Привет! Команды:\n/newcollect — создать сбор\n/status — статус сборов\n/remind — напомнить\n/paid @user сумма — записать нал\n/close — закрыть сбор\n/history — история сборов\n/cancel — отменить действие");
     } else {
       await ctx.reply("Привет! Нажмите кнопку «Отправить скрин оплаты» в группе.");
     }
@@ -103,7 +103,7 @@ export function registerHandlers(bot: Bot) {
     upsertMember(ctx.from!.id, collection.group_id, ctx.from!.first_name, ctx.from!.username);
 
     const fileId = ctx.message!.photo![ctx.message!.photo!.length - 1].file_id;
-    addPayment(collectionId, ctx.from!.id, fileId);
+    addPayment(collectionId, ctx.from!.id, fileId, collection.per_person);
     pendingScreenshots.delete(ctx.from!.id);
 
     await ctx.reply("Скриншот получен! Ожидайте подтверждения от админа. ⏳");

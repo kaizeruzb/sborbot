@@ -18,6 +18,14 @@ if (!schemaRow) {
   db.prepare("UPDATE _schema SET version = ?").run(SCHEMA_VERSION);
 }
 
+// Migrate: add amount column to payments if missing
+{
+  const cols = db.prepare("PRAGMA table_info(payments)").all() as { name: string }[];
+  if (cols.length > 0 && !cols.some((c) => c.name === "amount")) {
+    db.exec(`ALTER TABLE payments ADD COLUMN amount REAL NOT NULL DEFAULT 0`);
+  }
+}
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS groups (
     group_id INTEGER PRIMARY KEY,
@@ -53,6 +61,7 @@ db.exec(`
     collection_id INTEGER NOT NULL REFERENCES collections(id),
     user_id INTEGER NOT NULL,
     file_id TEXT,
+    amount REAL NOT NULL DEFAULT 0,
     status TEXT DEFAULT 'pending',
     reject_reason TEXT,
     created_at TEXT DEFAULT (datetime('now'))
@@ -75,7 +84,7 @@ export type Member = {
 
 export type Payment = {
   id: number; collection_id: number; user_id: number;
-  file_id: string | null; status: string;
+  file_id: string | null; amount: number; status: string;
   reject_reason: string | null; created_at: string;
 };
 
@@ -173,9 +182,9 @@ export function getMemberByUserId(userId: number, groupId: number) {
 
 // --- Payments ---
 
-const _addPayment = db.prepare(`INSERT INTO payments (collection_id, user_id, file_id) VALUES (?, ?, ?)`);
-export function addPayment(collectionId: number, userId: number, fileId: string) {
-  return _addPayment.run(collectionId, userId, fileId);
+const _addPayment = db.prepare(`INSERT INTO payments (collection_id, user_id, file_id, amount) VALUES (?, ?, ?, ?)`);
+export function addPayment(collectionId: number, userId: number, fileId: string | null, amount: number) {
+  return _addPayment.run(collectionId, userId, fileId, amount);
 }
 
 const _getPayment = db.prepare(
@@ -210,7 +219,7 @@ export type StatusMember = { user_id: number; first_name: string; username: stri
 
 export function getCollectionStatus(collectionId: number) {
   const collection = getCollectionById(collectionId);
-  if (!collection) return { paid: [] as StatusMember[], pending: [] as StatusMember[], knownUnpaid: [] as StatusMember[], unknownUnpaidCount: 0 };
+  if (!collection) return { paid: [] as StatusMember[], pending: [] as StatusMember[], knownUnpaid: [] as StatusMember[], unknownUnpaidCount: 0, collectedAmount: 0 };
 
   const payments = _getLatestPayments.all(collectionId) as Payment[];
   const members = getActiveMembers(collection.group_id);
@@ -219,9 +228,9 @@ export function getCollectionStatus(collectionId: number) {
   const paid: StatusMember[] = [];
   const pending: StatusMember[] = [];
   const paidUserIds = new Set<number>();
+  let collectedAmount = 0;
 
   for (const p of payments) {
-    // admin participates too — don't filter
     paidUserIds.add(p.user_id);
     const m = memberMap.get(p.user_id);
     const entry: StatusMember = {
@@ -229,19 +238,21 @@ export function getCollectionStatus(collectionId: number) {
       first_name: m?.first_name ?? `#${p.user_id}`,
       username: m?.username ?? null,
     };
-    if (p.status === "confirmed") paid.push(entry);
-    else if (p.status === "pending") pending.push(entry);
+    if (p.status === "confirmed") {
+      paid.push(entry);
+      collectedAmount += p.amount || collection.per_person; // fallback for old payments without amount
+    } else if (p.status === "pending") {
+      pending.push(entry);
+    }
   }
 
-  // Known unpaid: tracked members without any payment
   const knownUnpaid: StatusMember[] = members
     .filter((m) => !paidUserIds.has(m.user_id))
     .map((m) => ({ user_id: m.user_id, first_name: m.first_name, username: m.username }));
 
-  // Estimated unknown unpaid
   const unknownUnpaidCount = Math.max(0, collection.member_count - paid.length - pending.length - knownUnpaid.length);
 
-  return { paid, pending, knownUnpaid, unknownUnpaidCount };
+  return { paid, pending, knownUnpaid, unknownUnpaidCount, collectedAmount };
 }
 
 // --- Find active collections for a user ---

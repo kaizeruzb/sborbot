@@ -2,7 +2,8 @@ import { Context, InlineKeyboard } from "grammy";
 import {
   createCollection, getActiveCollection, getActiveCollections, getCollectionById,
   getCollectionStatus, closeCollection, getGroups, getPayment,
-  updatePaymentStatus, getClosedCollections, type Collection,
+  updatePaymentStatus, getClosedCollections, addPayment,
+  getMemberByUsername, getMemberByUserId, type Collection,
 } from "./db.js";
 
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "CPO_FIN";
@@ -211,10 +212,10 @@ export async function handleNewCollect(ctx: Context) {
 // --- Status text builder (reusable) ---
 
 export function buildStatusText(c: Collection, groupName?: string): string {
-  const { paid, pending, knownUnpaid, unknownUnpaidCount } = getCollectionStatus(c.id);
+  const { paid, pending, knownUnpaid, unknownUnpaidCount, collectedAmount } = getCollectionStatus(c.id);
   const totalUnpaid = knownUnpaid.length + unknownUnpaidCount;
 
-  const collected = paid.length * c.per_person;
+  const collected = collectedAmount;
   const remaining = c.total_amount - collected;
   const progressTotal = c.member_count || (paid.length + pending.length + totalUnpaid) || 1;
   const progressFilled = Math.round((paid.length / progressTotal) * 10);
@@ -355,14 +356,90 @@ export async function handleHistory(ctx: Context) {
 
   let text = "📜 История сборов:\n\n";
   for (const c of collections) {
-    const { paid } = getCollectionStatus(c.id);
+    const { paid, collectedAmount } = getCollectionStatus(c.id);
     const groupName = groupMap.get(c.group_id) || "?";
-    const collected = paid.length * c.per_person;
+    const collected = collectedAmount;
     text += `"${c.title}" (${groupName})\n`;
     text += `  ${c.created_at?.slice(0, 10)} | ✅ ${paid.length}/${c.member_count} | ${formatMoney(collected)}/${formatMoney(c.total_amount)}\n\n`;
   }
 
   await ctx.reply(text);
+}
+
+// --- /paid @username сумма ---
+
+export async function handlePaid(ctx: Context) {
+  if (ctx.chat?.type !== "private" || !isAdmin(ctx)) return;
+
+  const args = (ctx.match as string | undefined)?.trim();
+  if (!args) {
+    return ctx.reply("Формат: /paid @username сумма\nПример: /paid @ivan 5000");
+  }
+
+  // Parse: @username amount
+  const match = args.match(/^@(\S+)\s+(\d[\d\s,.]*)$/);
+  if (!match) {
+    return ctx.reply("Формат: /paid @username сумма\nПример: /paid @ivan 5000");
+  }
+
+  const username = match[1];
+  const amount = parseFloat(match[2].replace(/\s/g, "").replace(/,/g, "."));
+  if (isNaN(amount) || amount <= 0) {
+    return ctx.reply("Неверная сумма. Пример: /paid @ivan 5000");
+  }
+
+  // Find active collections
+  const collections = getActiveCollections();
+  if (collections.length === 0) return ctx.reply("Нет активных сборов.");
+
+  let collection: Collection;
+  if (collections.length === 1) {
+    collection = collections[0];
+  } else {
+    // Multiple active — try to find which group the user belongs to
+    let found: Collection | undefined;
+    for (const c of collections) {
+      const member = getMemberByUsername(username, c.group_id);
+      if (member) { found = c; break; }
+    }
+    if (!found) {
+      return ctx.reply(`Пользователь @${username} не найден ни в одном активном сборе.`);
+    }
+    collection = found;
+  }
+
+  // Find member
+  const member = getMemberByUsername(username, collection.group_id);
+  if (!member) {
+    return ctx.reply(`Пользователь @${username} не найден в группе сбора "${collection.title}".`);
+  }
+
+  // Check if already paid
+  const existing = getPayment(collection.id, member.user_id);
+  if (existing?.status === "confirmed") {
+    return ctx.reply(`@${username} уже оплатил(а) этот сбор.`);
+  }
+
+  // Add payment (no screenshot, cash)
+  addPayment(collection.id, member.user_id, null, amount);
+  updatePaymentStatus(collection.id, member.user_id, "confirmed");
+
+  await ctx.reply(`✅ Оплата ${formatMoney(amount)} от @${username} для сбора "${collection.title}" записана (нал).`);
+
+  // Notify user if possible
+  try {
+    await ctx.api.sendMessage(member.user_id,
+      `Ваша оплата ${formatMoney(amount)} для сбора "${collection.title}" записана! ✅`);
+  } catch { /* user may not have started bot */ }
+
+  // Auto-close check
+  const { pending, knownUnpaid, unknownUnpaidCount } = getCollectionStatus(collection.id);
+  if (pending.length === 0 && knownUnpaid.length === 0 && unknownUnpaidCount === 0) {
+    closeCollection(collection.id);
+    await ctx.api.sendMessage(collection.group_id,
+      `🎉 Сбор "${collection.title}" завершён! Все сдали!`);
+    await ctx.reply(`🎉 Все сдали! Сбор "${collection.title}" автоматически закрыт.`);
+  }
 }
 
 // --- /cancel ---

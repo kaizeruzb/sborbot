@@ -2,7 +2,7 @@ import "dotenv/config";
 import { Bot, InlineKeyboard } from "grammy";
 import {
   handleNewCollect, handleStatus, handleRemind,
-  handleClose, handleCancel, handleHistory, formatMoney, buildStatusText,
+  handleClose, handleCancel, handleHistory, handlePaid, formatMoney, buildStatusText,
 } from "./commands.js";
 import { registerHandlers } from "./handlers.js";
 import { getActiveCollectionsWithDeadline, getActiveCollections, getCollectionStatus, closeCollection } from "./db.js";
@@ -23,6 +23,7 @@ bot.command("remind", handleRemind);
 bot.command("close", handleClose);
 bot.command("cancel", handleCancel);
 bot.command("history", handleHistory);
+bot.command("paid", handlePaid);
 
 // --- Hourly: deadline checks + auto-status in groups ---
 
