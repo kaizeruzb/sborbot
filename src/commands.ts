@@ -2,7 +2,7 @@ import { Context, InlineKeyboard } from "grammy";
 import {
   createCollection, getActiveCollections, getCollectionById,
   getCollectionStatus, closeCollection, getGroups, getPayment,
-  updatePaymentStatus, type Collection, type Member,
+  updatePaymentStatus, getClosedCollections, type Collection,
 } from "./db.js";
 
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "CPO_FIN";
@@ -165,7 +165,9 @@ export async function handleAdminText(ctx: Context): Promise<boolean> {
       groupMsg += `📋 Реквизиты: ${s.details}\n`;
       groupMsg += `⏰ Дедлайн: ${deadlineText}`;
 
-      await ctx.api.sendMessage(s.groupId, groupMsg, { reply_markup: kb });
+      const sent = await ctx.api.sendMessage(s.groupId, groupMsg, { reply_markup: kb });
+      // Pin the announcement
+      try { await ctx.api.pinChatMessage(s.groupId, sent.message_id); } catch { /* no pin permission */ }
       await ctx.reply(`✅ Сбор "${s.title}" создан и отправлен в группу!\nСумма на человека: ${formatMoney(perPerson)}`);
       return true;
     }
@@ -224,8 +226,18 @@ export async function handleStatus(ctx: Context) {
     const totalUnpaid = knownUnpaid.length + unknownUnpaidCount;
     const groupName = groupMap.get(c.group_id) || "?";
 
+    const collected = paid.length * c.per_person;
+    const remaining = c.total_amount - collected;
+    const progressTotal = c.member_count || (paid.length + pending.length + totalUnpaid) || 1;
+    const progressFilled = Math.round((paid.length / progressTotal) * 10);
+    const bar = "█".repeat(progressFilled) + "░".repeat(10 - progressFilled);
+
     let text = `📊 Сбор "${c.title}" (${groupName})\n`;
-    text += `💵 ${formatMoney(c.per_person)} на чел. | Всего: ${formatMoney(c.total_amount)}\n\n`;
+    text += `[${bar}] ${paid.length}/${progressTotal}\n`;
+    text += `💵 По ${formatMoney(c.per_person)} на чел.\n`;
+    text += `💰 Собрано: ${formatMoney(collected)} / ${formatMoney(c.total_amount)}`;
+    if (remaining > 0) text += ` (осталось: ${formatMoney(remaining)})`;
+    text += `\n\n`;
 
     text += `✅ Сдали (${paid.length}):\n`;
     text += paid.length > 0
@@ -314,6 +326,29 @@ export async function doClose(ctx: Context, collection: Collection) {
     `Сбор "${collection.title}" закрыт.\n✅ Сдали: ${paid.length} | ⏳ На проверке: ${pending.length} | ❌ Не сдали: ~${knownUnpaid.length + unknownUnpaidCount}`,
   );
   await ctx.reply(`Сбор "${collection.title}" закрыт.`);
+}
+
+// --- /history ---
+
+export async function handleHistory(ctx: Context) {
+  if (ctx.chat?.type !== "private" || !isAdmin(ctx)) return;
+
+  const collections = getClosedCollections();
+  if (collections.length === 0) return ctx.reply("Нет завершённых сборов.");
+
+  const groups = getGroups();
+  const groupMap = new Map(groups.map((g) => [g.group_id, g.title]));
+
+  let text = "📜 История сборов:\n\n";
+  for (const c of collections) {
+    const { paid } = getCollectionStatus(c.id);
+    const groupName = groupMap.get(c.group_id) || "?";
+    const collected = paid.length * c.per_person;
+    text += `"${c.title}" (${groupName})\n`;
+    text += `  ${c.created_at?.slice(0, 10)} | ✅ ${paid.length}/${c.member_count} | ${formatMoney(collected)}/${formatMoney(c.total_amount)}\n\n`;
+  }
+
+  await ctx.reply(text);
 }
 
 // --- /cancel ---

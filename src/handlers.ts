@@ -2,7 +2,7 @@ import { Bot, Context, InlineKeyboard } from "grammy";
 import {
   upsertMember, deactivateMember, upsertGroup,
   getCollectionById, addPayment, getPayment, updatePaymentStatus,
-  getActiveCollectionsForUser,
+  getActiveCollectionsForUser, getCollectionStatus, closeCollection,
 } from "./db.js";
 import {
   isAdmin, adminFlow, pendingRejects, handleAdminText,
@@ -69,7 +69,7 @@ export function registerHandlers(bot: Bot) {
     }
 
     if (isAdmin(ctx)) {
-      await ctx.reply("Привет! Команды:\n/newcollect — создать сбор\n/status — статус сборов\n/remind — напомнить\n/close — закрыть сбор\n/cancel — отменить действие");
+      await ctx.reply("Привет! Команды:\n/newcollect — создать сбор\n/status — статус сборов\n/remind — напомнить\n/close — закрыть сбор\n/history — история сборов\n/cancel — отменить действие");
     } else {
       await ctx.reply("Привет! Нажмите кнопку «Отправить скрин оплаты» в группе.");
     }
@@ -195,6 +195,17 @@ export function registerHandlers(bot: Bot) {
         await ctx.api.sendMessage(targetUserId,
           `Ваша оплата для сбора "${collection?.title}" подтверждена! ✅`);
       } catch { /* ignore */ }
+
+      // Auto-close if everyone paid
+      if (collection) {
+        const { pending, knownUnpaid, unknownUnpaidCount } = getCollectionStatus(collectionId);
+        if (pending.length === 0 && knownUnpaid.length === 0 && unknownUnpaidCount === 0) {
+          closeCollection(collectionId);
+          await ctx.api.sendMessage(collection.group_id,
+            `🎉 Сбор "${collection.title}" завершён! Все сдали!`);
+          await ctx.reply(`🎉 Все сдали! Сбор "${collection.title}" автоматически закрыт.`);
+        }
+      }
       return;
     }
 

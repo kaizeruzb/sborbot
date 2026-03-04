@@ -2,7 +2,7 @@ import "dotenv/config";
 import { Bot } from "grammy";
 import {
   handleNewCollect, handleStatus, handleRemind,
-  handleClose, handleCancel, formatMoney,
+  handleClose, handleCancel, handleHistory, formatMoney,
 } from "./commands.js";
 import { registerHandlers } from "./handlers.js";
 import { getActiveCollectionsWithDeadline, getCollectionStatus, closeCollection, getGroups, getActiveMembers, getActiveCollections, db } from "./db.js";
@@ -23,6 +23,7 @@ bot.command("status", handleStatus);
 bot.command("remind", handleRemind);
 bot.command("close", handleClose);
 bot.command("cancel", handleCancel);
+bot.command("history", handleHistory);
 
 // Temporary debug command
 bot.command("debug", async (ctx) => {

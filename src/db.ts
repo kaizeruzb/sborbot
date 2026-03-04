@@ -255,4 +255,11 @@ export function getActiveCollectionsForUser(userId: number) {
   return _getActiveCollectionsForUser.all(userId) as Collection[];
 }
 
+const _getClosedCollections = db.prepare(
+  `SELECT * FROM collections WHERE status = 'closed' ORDER BY id DESC LIMIT 10`
+);
+export function getClosedCollections() {
+  return _getClosedCollections.all() as Collection[];
+}
+
 export { db };
