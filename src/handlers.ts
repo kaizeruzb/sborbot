@@ -51,6 +51,9 @@ export function registerHandlers(bot: Bot) {
         return ctx.reply("Этот сбор уже закрыт или не существует.");
       }
 
+      // Track user as member of collection's group
+      upsertMember(ctx.from!.id, collection.group_id, ctx.from!.first_name, ctx.from!.username);
+
       const existing = getPayment(collectionId, ctx.from!.id);
       if (existing?.status === "confirmed") {
         return ctx.reply("Ваша оплата уже подтверждена! ✅");
@@ -95,6 +98,9 @@ export function registerHandlers(bot: Bot) {
       pendingScreenshots.delete(ctx.from!.id);
       return ctx.reply("Этот сбор уже закрыт.");
     }
+
+    // Track user as member of collection's group
+    upsertMember(ctx.from!.id, collection.group_id, ctx.from!.first_name, ctx.from!.username);
 
     const fileId = ctx.message!.photo![ctx.message!.photo!.length - 1].file_id;
     addPayment(collectionId, ctx.from!.id, fileId);
@@ -163,10 +169,20 @@ export function registerHandlers(bot: Bot) {
     // Confirm payment
     if (data.startsWith("cfm:")) {
       if (!isAdmin(ctx)) return ctx.answerCallbackQuery({ text: "Нет доступа" });
-      const [, colId, userId] = data.split(":");
+      const [, colId, uId] = data.split(":");
       const collectionId = parseInt(colId);
-      const targetUserId = parseInt(userId);
+      const targetUserId = parseInt(uId);
       const collection = getCollectionById(collectionId);
+
+      // Ensure user is tracked as group member
+      if (collection) {
+        try {
+          const chat = await ctx.api.getChat(targetUserId);
+          if (chat.type === "private") {
+            upsertMember(targetUserId, collection.group_id, chat.first_name || "Unknown", chat.username);
+          }
+        } catch { /* ignore */ }
+      }
 
       updatePaymentStatus(collectionId, targetUserId, "confirmed");
       await ctx.answerCallbackQuery({ text: "Подтверждено!" });
@@ -185,10 +201,10 @@ export function registerHandlers(bot: Bot) {
     // Reject payment
     if (data.startsWith("rej:")) {
       if (!isAdmin(ctx)) return ctx.answerCallbackQuery({ text: "Нет доступа" });
-      const [, colId, userId] = data.split(":");
+      const [, colId, uId] = data.split(":");
       pendingRejects.set(ctx.from!.id, {
         collectionId: parseInt(colId),
-        userId: parseInt(userId),
+        userId: parseInt(uId),
       });
       await ctx.answerCallbackQuery();
       await ctx.editMessageCaption({
