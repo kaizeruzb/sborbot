@@ -19,7 +19,7 @@ bot.catch((err) => {
 
 // Debug: log every incoming update
 bot.use((ctx, next) => {
-  console.log(`[update] type=${ctx.updateType} chat=${ctx.chat?.id} from=${ctx.from?.username} text=${ctx.message?.text?.slice(0, 50)}`);
+  console.log(`[update] chat=${ctx.chat?.id} from=${ctx.from?.username} text=${ctx.message?.text?.slice(0, 50)}`);
   return next();
 });
 
@@ -82,9 +82,21 @@ async function hourlyTick() {
 
 setInterval(hourlyTick, 60 * 60 * 1000);
 
-bot.start({
-  allowed_updates: ["message", "callback_query", "chat_member"],
-  drop_pending_updates: true,
-});
+// Graceful shutdown — stop polling so new instance can take over
+function shutdown() {
+  console.log("Shutting down...");
+  bot.stop();
+  process.exit(0);
+}
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
 
-console.log("Bot started");
+// Delay start to let old container die on Railway rolling deploy
+const startDelay = process.env.RAILWAY_ENVIRONMENT ? 5000 : 0;
+setTimeout(() => {
+  bot.start({
+    allowed_updates: ["message", "callback_query", "chat_member"],
+    drop_pending_updates: true,
+  });
+  console.log("Bot started");
+}, startDelay);
