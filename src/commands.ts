@@ -1,235 +1,323 @@
-import { Bot, Context, InlineKeyboard } from "grammy";
-import { type Conversation, type ConversationFlavor, createConversation } from "@grammyjs/conversations";
+import { Context, InlineKeyboard } from "grammy";
 import {
-  createCollection,
-  getActiveCollection,
-  getCollectionStatus,
-  updatePaymentStatus,
-  closeCollection,
-  getMemberByUsername,
-  getMemberByUserId,
-  getPayment,
+  createCollection, getActiveCollections, getCollectionById,
+  getCollectionStatus, closeCollection, getGroups, getPayment,
+  updatePaymentStatus, type Collection, type Member,
 } from "./db.js";
 
-export type MyContext = Context & ConversationFlavor<Context>;
-export type MyConversation = Conversation<MyContext, MyContext>;
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "CPO_FIN";
 
-// --- /newcollect conversation ---
-
-async function newCollectConversation(conversation: MyConversation, ctx: MyContext) {
-  const chatId = ctx.chat!.id;
-  const adminId = ctx.from!.id;
-
-  // Check if there's already an active collection
-  const existing = getActiveCollection(chatId);
-  if (existing) {
-    await ctx.reply(`Уже есть активный сбор: "${existing.title}". Закройте его командой /close перед созданием нового.`);
-    return;
-  }
-
-  await ctx.reply("Название сбора?");
-  const titleMsg = await conversation.form.text({
-    otherwise: (ctx) => ctx.reply("Пожалуйста, отправьте текст."),
-  });
-
-  await ctx.reply("Сумма с человека?");
-  const amountMsg = await conversation.form.text({
-    otherwise: (ctx) => ctx.reply("Пожалуйста, отправьте текст."),
-  });
-
-  await ctx.reply("Реквизиты для оплаты?");
-  const detailsMsg = await conversation.form.text({
-    otherwise: (ctx) => ctx.reply("Пожалуйста, отправьте текст."),
-  });
-
-  await ctx.reply('Дедлайн? (ДД.ММ.ГГГГ или "нет")');
-  const deadlineRaw = await conversation.form.text({
-    otherwise: (ctx) => ctx.reply("Пожалуйста, отправьте текст."),
-  });
-
-  let deadline: string | undefined;
-  if (deadlineRaw !== "нет" && deadlineRaw !== "-") {
-    // Parse DD.MM.YYYY to ISO
-    const match = deadlineRaw.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
-    if (match) {
-      deadline = `${match[3]}-${match[2].padStart(2, "0")}-${match[1].padStart(2, "0")}`;
-    } else {
-      // Try DD.MM (current year)
-      const match2 = deadlineRaw.match(/^(\d{1,2})\.(\d{1,2})$/);
-      if (match2) {
-        const year = new Date().getFullYear();
-        deadline = `${year}-${match2[2].padStart(2, "0")}-${match2[1].padStart(2, "0")}`;
-      }
-    }
-  }
-
-  const result = createCollection(chatId, adminId, titleMsg, amountMsg, detailsMsg, deadline);
-  const collectionId = result.lastInsertRowid as number;
-
-  const botInfo = await ctx.api.getMe();
-  const keyboard = new InlineKeyboard().url(
-    "Отправить скрин оплаты",
-    `https://t.me/${botInfo.username}?start=pay_${collectionId}`,
-  );
-
-  const deadlineText = deadline ?? "не указан";
-  await ctx.reply(
-    `💰 Новый сбор: "${titleMsg}"\nСумма: ${amountMsg}\nРеквизиты: ${detailsMsg}\nДедлайн: ${deadlineText}\n\nНажмите кнопку ниже, чтобы отправить скрин оплаты:`,
-    { reply_markup: keyboard },
-  );
+export function isAdmin(ctx: Context): boolean {
+  return ctx.from?.username === ADMIN_USERNAME;
 }
 
-// --- Register all commands ---
+export function formatMoney(n: number): string {
+  return Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+}
 
-export function registerCommands(bot: Bot<MyContext>) {
-  bot.use(createConversation(newCollectConversation));
+// --- Admin flow state machine ---
 
-  bot.command("newcollect", async (ctx) => {
-    if (ctx.chat.type !== "group" && ctx.chat.type !== "supergroup") {
-      return ctx.reply("Эта команда работает только в группах.");
+type FlowState =
+  | { step: "title"; groupId: number }
+  | { step: "message"; groupId: number; title: string }
+  | { step: "amount"; groupId: number; title: string; message: string }
+  | { step: "count"; groupId: number; title: string; message: string; totalAmount: number; suggestedCount: number }
+  | { step: "count_custom"; groupId: number; title: string; message: string; totalAmount: number }
+  | { step: "details"; groupId: number; title: string; message: string; totalAmount: number; memberCount: number }
+  | { step: "deadline"; groupId: number; title: string; message: string; totalAmount: number; memberCount: number; details: string };
+
+export const adminFlow = new Map<number, FlowState>();
+export const pendingRejects = new Map<number, { collectionId: number; userId: number }>();
+
+// --- Handle admin text in DM (state machine) ---
+
+export async function handleAdminText(ctx: Context): Promise<boolean> {
+  const adminId = ctx.from!.id;
+  const text = ctx.message?.text?.trim();
+  if (!text) return false;
+
+  // Priority 1: pending reject reason
+  if (pendingRejects.has(adminId)) {
+    const { collectionId, userId } = pendingRejects.get(adminId)!;
+    pendingRejects.delete(adminId);
+
+    const collection = getCollectionById(collectionId);
+    updatePaymentStatus(collectionId, userId, "rejected", text);
+
+    // Notify user
+    try {
+      const botInfo = await ctx.api.getMe();
+      const kb = new InlineKeyboard().url(
+        "💳 Отправить новый скрин",
+        `https://t.me/${botInfo.username}?start=pay_${collectionId}`,
+      );
+      await ctx.api.sendMessage(userId,
+        `❌ Ваш скриншот для сбора "${collection?.title}" отклонён.\nПричина: ${text}\n\nОтправьте новый:`,
+        { reply_markup: kb },
+      );
+    } catch { /* user may not have started bot */ }
+
+    await ctx.reply(`❌ Скрин отклонён. Пользователь уведомлён.`);
+
+    // Remind about ongoing flow
+    const state = adminFlow.get(adminId);
+    if (state) {
+      await ctx.reply(`↩️ Продолжаем создание сбора. ${stepPrompt(state)}`);
     }
-    await ctx.conversation.enter("newCollectConversation");
-  });
+    return true;
+  }
 
-  // --- /status ---
-  bot.command("status", async (ctx) => {
-    if (ctx.chat.type !== "group" && ctx.chat.type !== "supergroup") {
-      return ctx.reply("Эта команда работает только в группах.");
+  // Priority 2: admin flow
+  const state = adminFlow.get(adminId);
+  if (!state) return false;
+
+  switch (state.step) {
+    case "title":
+      adminFlow.set(adminId, { step: "message", groupId: state.groupId, title: text });
+      await ctx.reply("Введите описание для участников (что собираем, расчёты, ссылки — всё в одном сообщении):");
+      return true;
+
+    case "message":
+      adminFlow.set(adminId, { step: "amount", groupId: state.groupId, title: state.title, message: text });
+      await ctx.reply("Общая сумма сбора (число):");
+      return true;
+
+    case "amount": {
+      const amount = parseFloat(text.replace(/\s/g, "").replace(/,/g, "."));
+      if (isNaN(amount) || amount <= 0) {
+        await ctx.reply("Введите число больше 0:");
+        return true;
+      }
+
+      let suggestedCount = 0;
+      try {
+        const total = await ctx.api.getChatMemberCount(state.groupId);
+        suggestedCount = total - 2; // minus bot and admin
+        if (suggestedCount < 1) suggestedCount = 1;
+      } catch { /* can't get count */ }
+
+      if (suggestedCount > 0) {
+        const perPerson = amount / suggestedCount;
+        adminFlow.set(adminId, { ...state, step: "count", totalAmount: amount, suggestedCount });
+        const kb = new InlineKeyboard()
+          .text(`✅ Да, ${suggestedCount} чел. (${formatMoney(perPerson)} на чел.)`, "cntok")
+          .row()
+          .text("✏️ Ввести своё число", "cntcustom");
+        await ctx.reply(`В группе ${suggestedCount} участников (без бота и вас).`, { reply_markup: kb });
+      } else {
+        adminFlow.set(adminId, { ...state, step: "count_custom", totalAmount: amount });
+        await ctx.reply("Не удалось определить кол-во участников. Введите число:");
+      }
+      return true;
     }
 
-    const collection = getActiveCollection(ctx.chat.id);
-    if (!collection) {
-      return ctx.reply("Нет активного сбора в этой группе.");
+    case "count_custom": {
+      const count = parseInt(text);
+      if (isNaN(count) || count < 1) {
+        await ctx.reply("Введите число больше 0:");
+        return true;
+      }
+      adminFlow.set(adminId, { step: "details", groupId: state.groupId, title: state.title, message: state.message, totalAmount: state.totalAmount, memberCount: count });
+      const pp = state.totalAmount / count;
+      await ctx.reply(`Сумма на человека: ${formatMoney(pp)}\n\nРеквизиты для оплаты:`);
+      return true;
     }
 
-    const { paid, unpaid } = getCollectionStatus(collection.id);
-    const total = paid.length + unpaid.length;
+    case "details":
+      adminFlow.set(adminId, { step: "deadline", groupId: state.groupId, title: state.title, message: state.message, totalAmount: state.totalAmount, memberCount: state.memberCount, details: text });
+      await ctx.reply("Дедлайн (ДД.ММ или ДД.ММ.ГГГГ, или «нет»):");
+      return true;
 
-    let text = `📊 Сбор "${collection.title}"\n`;
-    text += `Сдали (${paid.length}/${total}):\n`;
+    case "deadline": {
+      const s = state;
+      let deadline: string | undefined;
+      if (text !== "нет" && text !== "-" && text !== "no") {
+        const m = text.match(/^(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?$/);
+        if (m) {
+          const year = m[3] || new Date().getFullYear().toString();
+          deadline = `${year}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
+        }
+      }
+
+      const perPerson = s.totalAmount / s.memberCount;
+      const result = createCollection(
+        s.groupId, adminId, s.title, s.message,
+        s.totalAmount, s.memberCount, perPerson,
+        s.details, deadline,
+      );
+      const collectionId = result.lastInsertRowid as number;
+      adminFlow.delete(adminId);
+
+      // Post announcement to group
+      const botInfo = await ctx.api.getMe();
+      const kb = new InlineKeyboard().url(
+        "💳 Отправить скрин оплаты",
+        `https://t.me/${botInfo.username}?start=pay_${collectionId}`,
+      );
+
+      const deadlineText = deadline
+        ? deadline.split("-").reverse().join(".")
+        : "не указан";
+
+      let groupMsg = `💰 Новый сбор: "${s.title}"\n\n`;
+      groupMsg += s.message + "\n\n";
+      groupMsg += `💵 Сумма на человека: ${formatMoney(perPerson)}\n`;
+      groupMsg += `📋 Реквизиты: ${s.details}\n`;
+      groupMsg += `⏰ Дедлайн: ${deadlineText}`;
+
+      await ctx.api.sendMessage(s.groupId, groupMsg, { reply_markup: kb });
+      await ctx.reply(`✅ Сбор "${s.title}" создан и отправлен в группу!\nСумма на человека: ${formatMoney(perPerson)}`);
+      return true;
+    }
+
+    default:
+      return false;
+  }
+}
+
+function stepPrompt(state: FlowState): string {
+  switch (state.step) {
+    case "title": return "Название сбора?";
+    case "message": return "Описание для участников?";
+    case "amount": return "Общая сумма сбора (число)?";
+    case "count_custom": return "Количество участников?";
+    case "details": return "Реквизиты?";
+    case "deadline": return "Дедлайн (ДД.ММ или «нет»)?";
+    default: return "";
+  }
+}
+
+// --- /newcollect ---
+
+export async function handleNewCollect(ctx: Context) {
+  if (ctx.chat?.type !== "private" || !isAdmin(ctx)) return;
+
+  const groups = getGroups();
+  if (groups.length === 0) {
+    return ctx.reply("Бот пока не добавлен ни в одну группу. Добавьте бота в группу, и пусть кто-нибудь напишет там сообщение.");
+  }
+
+  adminFlow.delete(ctx.from!.id); // reset any ongoing flow
+
+  const kb = new InlineKeyboard();
+  for (const g of groups) {
+    kb.text(g.title, `grp:${g.group_id}`).row();
+  }
+  await ctx.reply("Выберите группу для сбора:", { reply_markup: kb });
+}
+
+// --- /status ---
+
+export async function handleStatus(ctx: Context) {
+  if (ctx.chat?.type !== "private" || !isAdmin(ctx)) return;
+
+  const collections = getActiveCollections();
+  if (collections.length === 0) {
+    return ctx.reply("Нет активных сборов.");
+  }
+
+  const groups = getGroups();
+  const groupMap = new Map(groups.map((g) => [g.group_id, g.title]));
+
+  for (const c of collections) {
+    const { paid, pending, unpaid } = getCollectionStatus(c.id);
+    const total = paid.length + pending.length + unpaid.length;
+    const groupName = groupMap.get(c.group_id) || "?";
+
+    let text = `📊 Сбор "${c.title}" (${groupName})\n`;
+    text += `💵 ${formatMoney(c.per_person)} на чел. | Всего: ${formatMoney(c.total_amount)}\n\n`;
+
+    text += `✅ Сдали (${paid.length}/${total}):\n`;
     text += paid.length > 0
-      ? paid.map((m) => `  ✅ ${m.first_name}`).join("\n")
+      ? paid.map((m) => `  ${m.first_name}`).join("\n")
       : "  —";
-    text += `\nНе сдали (${unpaid.length}/${total}):\n`;
+
+    text += `\n⏳ На проверке (${pending.length}):\n`;
+    text += pending.length > 0
+      ? pending.map((m) => `  ${m.first_name}`).join("\n")
+      : "  —";
+
+    text += `\n❌ Не сдали (${unpaid.length}):\n`;
     text += unpaid.length > 0
-      ? unpaid.map((m) => `  ❌ ${m.first_name}${m.username ? ` (@${m.username})` : ""}`).join("\n")
+      ? unpaid.map((m) => `  ${m.first_name}${m.username ? ` (@${m.username})` : ""}`).join("\n")
       : "  —";
 
     await ctx.reply(text);
-  });
-
-  // --- /confirm @user ---
-  bot.command("confirm", async (ctx) => {
-    if (ctx.chat.type !== "group" && ctx.chat.type !== "supergroup") return;
-
-    const collection = getActiveCollection(ctx.chat.id);
-    if (!collection) return ctx.reply("Нет активного сбора.");
-    if (ctx.from!.id !== collection.admin_id) return ctx.reply("Только админ сбора может подтверждать оплату.");
-
-    const target = resolveTargetUser(ctx, collection.group_id);
-    if (!target) return ctx.reply("Укажите пользователя: /confirm @username");
-
-    const payment = getPayment(collection.id, target.user_id);
-    if (!payment || payment.status === "confirmed") {
-      return ctx.reply(`У ${target.first_name} нет ожидающего подтверждения платежа.`);
-    }
-
-    updatePaymentStatus(collection.id, target.user_id, "confirmed");
-    await ctx.reply(`✅ Оплата от ${target.first_name} подтверждена!`);
-
-    // Notify user in DM
-    try {
-      await ctx.api.sendMessage(target.user_id, `Ваша оплата для сбора "${collection.title}" подтверждена! ✅`);
-    } catch { /* user may not have started bot */ }
-  });
-
-  // --- /reject @user reason ---
-  bot.command("reject", async (ctx) => {
-    if (ctx.chat.type !== "group" && ctx.chat.type !== "supergroup") return;
-
-    const collection = getActiveCollection(ctx.chat.id);
-    if (!collection) return ctx.reply("Нет активного сбора.");
-    if (ctx.from!.id !== collection.admin_id) return ctx.reply("Только админ сбора может отклонять оплату.");
-
-    const args = (ctx.match ?? "").trim().split(/\s+/);
-    const usernameRaw = args[0];
-    const reason = args.slice(1).join(" ") || "Причина не указана";
-
-    if (!usernameRaw) return ctx.reply("Укажите пользователя: /reject @username причина");
-
-    const username = usernameRaw.replace(/^@/, "");
-    const member = getMemberByUsername(username, collection.group_id);
-    if (!member) return ctx.reply(`Пользователь @${username} не найден в группе.`);
-
-    const payment = getPayment(collection.id, member.user_id);
-    if (!payment || payment.status !== "pending") {
-      return ctx.reply(`У ${member.first_name} нет ожидающего подтверждения платежа.`);
-    }
-
-    updatePaymentStatus(collection.id, member.user_id, "rejected", reason);
-    await ctx.reply(`❌ Скрин от ${member.first_name} отклонён: ${reason}`);
-
-    // Notify user in DM
-    try {
-      const botInfo = await ctx.api.getMe();
-      const keyboard = new InlineKeyboard().url(
-        "Отправить новый скрин",
-        `https://t.me/${botInfo.username}?start=pay_${collection.id}`,
-      );
-      await ctx.api.sendMessage(
-        member.user_id,
-        `Ваш скриншот для сбора "${collection.title}" отклонён.\nПричина: ${reason}\n\nОтправьте новый скриншот:`,
-        { reply_markup: keyboard },
-      );
-    } catch { /* user may not have started bot */ }
-  });
-
-  // --- /remind ---
-  bot.command("remind", async (ctx) => {
-    if (ctx.chat.type !== "group" && ctx.chat.type !== "supergroup") return;
-
-    const collection = getActiveCollection(ctx.chat.id);
-    if (!collection) return ctx.reply("Нет активного сбора.");
-
-    const { unpaid } = getCollectionStatus(collection.id);
-    if (unpaid.length === 0) {
-      return ctx.reply("Все участники уже сдали! 🎉");
-    }
-
-    const mentions = unpaid.map((m) => (m.username ? `@${m.username}` : m.first_name)).join(", ");
-    await ctx.reply(
-      `Ребята, ждём оплату от: ${mentions}\n\nСумма: ${collection.amount}\nРеквизиты: ${collection.details}`,
-    );
-  });
-
-  // --- /close ---
-  bot.command("close", async (ctx) => {
-    if (ctx.chat.type !== "group" && ctx.chat.type !== "supergroup") return;
-
-    const collection = getActiveCollection(ctx.chat.id);
-    if (!collection) return ctx.reply("Нет активного сбора.");
-    if (ctx.from!.id !== collection.admin_id) return ctx.reply("Только админ сбора может закрыть его.");
-
-    closeCollection(collection.id);
-    const { paid, unpaid } = getCollectionStatus(collection.id);
-    await ctx.reply(
-      `Сбор "${collection.title}" закрыт.\nСдали: ${paid.length}, не сдали: ${unpaid.length}.`,
-    );
-  });
+  }
 }
 
-// Helper: resolve target user from @username in command args or reply
-function resolveTargetUser(ctx: Context, groupId: number) {
-  // Try reply
-  if (ctx.message?.reply_to_message?.from) {
-    const userId = ctx.message.reply_to_message.from.id;
-    return getMemberByUserId(userId, groupId);
+// --- /remind ---
+
+export async function handleRemind(ctx: Context) {
+  if (ctx.chat?.type !== "private" || !isAdmin(ctx)) return;
+
+  const collections = getActiveCollections();
+  if (collections.length === 0) return ctx.reply("Нет активных сборов.");
+
+  if (collections.length === 1) {
+    await sendReminder(ctx, collections[0]);
+  } else {
+    const kb = new InlineKeyboard();
+    for (const c of collections) {
+      kb.text(c.title, `rem:${c.id}`).row();
+    }
+    await ctx.reply("Для какого сбора напомнить?", { reply_markup: kb });
+  }
+}
+
+export async function sendReminder(ctx: Context, collection: Collection) {
+  const { unpaid } = getCollectionStatus(collection.id);
+  if (unpaid.length === 0) {
+    return ctx.reply(`Все участники сбора "${collection.title}" уже сдали! 🎉`);
   }
 
-  // Try @username from args
-  const args = (ctx.match as string ?? "").trim();
-  if (!args) return undefined;
+  const mentions = unpaid.map((m) => (m.username ? `@${m.username}` : m.first_name)).join(", ");
+  const botInfo = await ctx.api.getMe();
+  const kb = new InlineKeyboard().url(
+    "💳 Отправить скрин оплаты",
+    `https://t.me/${botInfo.username}?start=pay_${collection.id}`,
+  );
 
-  const username = args.split(/\s+/)[0].replace(/^@/, "");
-  return getMemberByUsername(username, groupId);
+  await ctx.api.sendMessage(collection.group_id,
+    `⏰ Напоминание! Ждём оплату от: ${mentions}\n\nСбор: "${collection.title}"\nСумма: ${formatMoney(collection.per_person)}\nРеквизиты: ${collection.details}`,
+    { reply_markup: kb },
+  );
+  await ctx.reply(`Напоминание отправлено в группу (не сдали: ${unpaid.length}).`);
+}
+
+// --- /close ---
+
+export async function handleClose(ctx: Context) {
+  if (ctx.chat?.type !== "private" || !isAdmin(ctx)) return;
+
+  const collections = getActiveCollections();
+  if (collections.length === 0) return ctx.reply("Нет активных сборов.");
+
+  if (collections.length === 1) {
+    await doClose(ctx, collections[0]);
+  } else {
+    const kb = new InlineKeyboard();
+    for (const c of collections) {
+      kb.text(c.title, `cls:${c.id}`).row();
+    }
+    await ctx.reply("Какой сбор закрыть?", { reply_markup: kb });
+  }
+}
+
+export async function doClose(ctx: Context, collection: Collection) {
+  closeCollection(collection.id);
+  const { paid, pending, unpaid } = getCollectionStatus(collection.id);
+  await ctx.api.sendMessage(collection.group_id,
+    `Сбор "${collection.title}" закрыт.\n✅ Сдали: ${paid.length} | ⏳ На проверке: ${pending.length} | ❌ Не сдали: ${unpaid.length}`,
+  );
+  await ctx.reply(`Сбор "${collection.title}" закрыт.`);
+}
+
+// --- /cancel ---
+
+export async function handleCancel(ctx: Context) {
+  if (ctx.chat?.type !== "private" || !isAdmin(ctx)) return;
+  adminFlow.delete(ctx.from!.id);
+  pendingRejects.delete(ctx.from!.id);
+  await ctx.reply("Действие отменено.");
 }

@@ -1,20 +1,36 @@
-import { Bot, Context } from "grammy";
-import { ConversationFlavor } from "@grammyjs/conversations";
-import { upsertMember, deactivateMember, getCollectionById, addPayment, getPayment } from "./db.js";
+import { Bot, Context, InlineKeyboard } from "grammy";
+import {
+  upsertMember, deactivateMember, upsertGroup,
+  getCollectionById, addPayment, getPayment, updatePaymentStatus,
+  getActiveCollectionsForUser, getCollectionStatus,
+} from "./db.js";
+import {
+  isAdmin, adminFlow, pendingRejects, handleAdminText,
+  sendReminder, doClose, formatMoney,
+} from "./commands.js";
 
-type MyContext = Context & ConversationFlavor<Context>;
-
-// In-memory state: userId -> collectionId they're about to send a screenshot for
+// In-memory: userId -> collectionId they're about to send a screenshot for
 const pendingScreenshots = new Map<number, number>();
 
-export { pendingScreenshots };
+export function registerHandlers(bot: Bot) {
+  // --- Track groups and members from messages ---
+  bot.on("message", (ctx, next) => {
+    if (ctx.chat.type === "group" || ctx.chat.type === "supergroup") {
+      upsertGroup(ctx.chat.id, ctx.chat.title || "Unnamed");
+      if (ctx.from) {
+        upsertMember(ctx.from.id, ctx.chat.id, ctx.from.first_name, ctx.from.username);
+      }
+    }
+    return next();
+  });
 
-export function registerHandlers(bot: Bot<MyContext>) {
-  // Track members via chat_member events
+  // --- Track via chat_member events ---
   bot.on("chat_member", (ctx) => {
-    const member = ctx.chatMember.new_chat_member;
     const groupId = ctx.chat.id;
-
+    if (ctx.chat.type === "group" || ctx.chat.type === "supergroup") {
+      upsertGroup(groupId, ctx.chat.title || "Unnamed");
+    }
+    const member = ctx.chatMember.new_chat_member;
     if (member.status === "member" || member.status === "administrator" || member.status === "creator") {
       upsertMember(member.user.id, groupId, member.user.first_name, member.user.username);
     } else if (member.status === "left" || member.status === "kicked") {
@@ -22,15 +38,7 @@ export function registerHandlers(bot: Bot<MyContext>) {
     }
   });
 
-  // Fallback: track members by messages in group
-  bot.on("message", (ctx, next) => {
-    if (ctx.chat.type === "group" || ctx.chat.type === "supergroup") {
-      upsertMember(ctx.from!.id, ctx.chat.id, ctx.from!.first_name, ctx.from!.username);
-    }
-    return next();
-  });
-
-  // Handle /start with deep link for payment
+  // --- /start with deep link ---
   bot.command("start", async (ctx) => {
     if (ctx.chat.type !== "private") return;
 
@@ -44,30 +52,43 @@ export function registerHandlers(bot: Bot<MyContext>) {
       }
 
       const existing = getPayment(collectionId, ctx.from!.id);
-      if (existing && existing.status === "confirmed") {
-        return ctx.reply("Ваша оплата уже подтверждена!");
+      if (existing?.status === "confirmed") {
+        return ctx.reply("Ваша оплата уже подтверждена! ✅");
       }
-      if (existing && existing.status === "pending") {
-        return ctx.reply("Ваш скриншот уже отправлен и ожидает подтверждения от админа.");
+      if (existing?.status === "pending") {
+        return ctx.reply("Ваш скриншот уже отправлен и ожидает подтверждения от админа. ⏳");
       }
 
-      // If rejected — allow re-upload
       pendingScreenshots.set(ctx.from!.id, collectionId);
-      await ctx.reply(
-        `Отправьте скриншот оплаты для сбора "${collection.title}"\n\nСумма: ${collection.amount}\nРеквизиты: ${collection.details}`,
+      return ctx.reply(
+        `Отправьте скриншот оплаты для сбора "${collection.title}"\n\n💵 Сумма: ${formatMoney(collection.per_person)}\n📋 Реквизиты: ${collection.details}`,
       );
-      return;
     }
 
-    await ctx.reply("Привет! Добавьте меня в группу и используйте /newcollect для создания сбора.");
+    if (isAdmin(ctx)) {
+      await ctx.reply("Привет! Команды:\n/newcollect — создать сбор\n/status — статус сборов\n/remind — напомнить\n/close — закрыть сбор\n/cancel — отменить действие");
+    } else {
+      await ctx.reply("Привет! Нажмите кнопку «Отправить скрин оплаты» в группе.");
+    }
   });
 
-  // Handle photo in DM — accept screenshot
+  // --- Photo in DM → accept screenshot ---
   bot.on("message:photo", async (ctx) => {
     if (ctx.chat.type !== "private") return;
 
-    const collectionId = pendingScreenshots.get(ctx.from!.id);
-    if (!collectionId) return;
+    let collectionId = pendingScreenshots.get(ctx.from!.id);
+
+    // Fallback: find active collection for user
+    if (!collectionId) {
+      const collections = getActiveCollectionsForUser(ctx.from!.id);
+      if (collections.length === 1) {
+        collectionId = collections[0].id;
+      } else if (collections.length > 1) {
+        return ctx.reply("У вас несколько активных сборов. Нажмите кнопку «Отправить скрин» в нужном сборе.");
+      } else {
+        return ctx.reply("Нет активных сборов. Нажмите кнопку «Отправить скрин» в группе.");
+      }
+    }
 
     const collection = getCollectionById(collectionId);
     if (!collection || collection.status !== "active") {
@@ -79,16 +100,132 @@ export function registerHandlers(bot: Bot<MyContext>) {
     addPayment(collectionId, ctx.from!.id, fileId);
     pendingScreenshots.delete(ctx.from!.id);
 
-    await ctx.reply("Скриншот получен! Ожидайте подтверждения от админа.");
+    await ctx.reply("Скриншот получен! Ожидайте подтверждения от админа. ⏳");
 
-    // Notify admin
+    // Send to admin with confirm/reject buttons
+    const name = ctx.from!.username ? `@${ctx.from!.username}` : ctx.from!.first_name;
+    const kb = new InlineKeyboard()
+      .text("✅ Подтвердить", `cfm:${collectionId}:${ctx.from!.id}`)
+      .text("❌ Отклонить", `rej:${collectionId}:${ctx.from!.id}`);
+
     try {
-      const name = ctx.from!.username ? `@${ctx.from!.username}` : ctx.from!.first_name;
       await ctx.api.sendPhoto(collection.admin_id, fileId, {
-        caption: `Новый скрин оплаты от ${name} для сбора "${collection.title}"`,
+        caption: `Скрин от ${name}\nСбор: "${collection.title}"`,
+        reply_markup: kb,
       });
-    } catch {
-      // Admin may not have started the bot — ignore
+    } catch { /* admin may not have started bot */ }
+  });
+
+  // --- Callback queries ---
+  bot.on("callback_query:data", async (ctx) => {
+    const data = ctx.callbackQuery.data;
+
+    // Group selection for /newcollect
+    if (data.startsWith("grp:")) {
+      if (!isAdmin(ctx)) return ctx.answerCallbackQuery({ text: "Нет доступа" });
+      const groupId = parseInt(data.slice(4));
+      adminFlow.set(ctx.from!.id, { step: "title", groupId });
+      await ctx.answerCallbackQuery();
+      await ctx.editMessageText("Группа выбрана. Введите название сбора:");
+      return;
     }
+
+    // Count OK for /newcollect
+    if (data === "cntok") {
+      if (!isAdmin(ctx)) return ctx.answerCallbackQuery({ text: "Нет доступа" });
+      const state = adminFlow.get(ctx.from!.id);
+      if (!state || state.step !== "count") return ctx.answerCallbackQuery();
+      const s = state;
+      const perPerson = s.totalAmount / s.suggestedCount;
+      adminFlow.set(ctx.from!.id, {
+        step: "details", groupId: s.groupId, title: s.title,
+        message: s.message, totalAmount: s.totalAmount, memberCount: s.suggestedCount,
+      });
+      await ctx.answerCallbackQuery();
+      await ctx.editMessageText(`Участников: ${s.suggestedCount}, по ${formatMoney(perPerson)} на чел.\n\nРеквизиты для оплаты:`);
+      return;
+    }
+
+    // Count custom
+    if (data === "cntcustom") {
+      if (!isAdmin(ctx)) return ctx.answerCallbackQuery({ text: "Нет доступа" });
+      const state = adminFlow.get(ctx.from!.id);
+      if (!state || state.step !== "count") return ctx.answerCallbackQuery();
+      adminFlow.set(ctx.from!.id, {
+        step: "count_custom", groupId: state.groupId, title: state.title,
+        message: state.message, totalAmount: state.totalAmount,
+      });
+      await ctx.answerCallbackQuery();
+      await ctx.editMessageText("Введите количество участников:");
+      return;
+    }
+
+    // Confirm payment
+    if (data.startsWith("cfm:")) {
+      if (!isAdmin(ctx)) return ctx.answerCallbackQuery({ text: "Нет доступа" });
+      const [, colId, userId] = data.split(":");
+      const collectionId = parseInt(colId);
+      const targetUserId = parseInt(userId);
+      const collection = getCollectionById(collectionId);
+
+      updatePaymentStatus(collectionId, targetUserId, "confirmed");
+      await ctx.answerCallbackQuery({ text: "Подтверждено!" });
+      await ctx.editMessageCaption({
+        caption: ctx.callbackQuery.message?.caption + "\n\n✅ ПОДТВЕРЖДЕНО",
+      });
+
+      // Notify user
+      try {
+        await ctx.api.sendMessage(targetUserId,
+          `Ваша оплата для сбора "${collection?.title}" подтверждена! ✅`);
+      } catch { /* ignore */ }
+      return;
+    }
+
+    // Reject payment
+    if (data.startsWith("rej:")) {
+      if (!isAdmin(ctx)) return ctx.answerCallbackQuery({ text: "Нет доступа" });
+      const [, colId, userId] = data.split(":");
+      pendingRejects.set(ctx.from!.id, {
+        collectionId: parseInt(colId),
+        userId: parseInt(userId),
+      });
+      await ctx.answerCallbackQuery();
+      await ctx.editMessageCaption({
+        caption: ctx.callbackQuery.message?.caption + "\n\n❌ ОТКЛОНЯЕТСЯ...",
+      });
+      await ctx.reply("Введите причину отклонения:");
+      return;
+    }
+
+    // Remind callback (multi-collection selection)
+    if (data.startsWith("rem:")) {
+      if (!isAdmin(ctx)) return ctx.answerCallbackQuery({ text: "Нет доступа" });
+      const collectionId = parseInt(data.slice(4));
+      const collection = getCollectionById(collectionId);
+      if (!collection) return ctx.answerCallbackQuery({ text: "Сбор не найден" });
+      await ctx.answerCallbackQuery();
+      await sendReminder(ctx, collection);
+      return;
+    }
+
+    // Close callback
+    if (data.startsWith("cls:")) {
+      if (!isAdmin(ctx)) return ctx.answerCallbackQuery({ text: "Нет доступа" });
+      const collectionId = parseInt(data.slice(4));
+      const collection = getCollectionById(collectionId);
+      if (!collection) return ctx.answerCallbackQuery({ text: "Сбор не найден" });
+      await ctx.answerCallbackQuery();
+      await doClose(ctx, collection);
+      return;
+    }
+
+    await ctx.answerCallbackQuery();
+  });
+
+  // --- Admin DM text (state machine) ---
+  bot.on("message:text", async (ctx) => {
+    if (ctx.chat.type !== "private" || !isAdmin(ctx)) return;
+    await handleAdminText(ctx);
   });
 }
