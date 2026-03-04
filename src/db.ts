@@ -1,6 +1,10 @@
 import Database from "better-sqlite3";
 
-const db = new Database("sborbot.db");
+import { existsSync } from "fs";
+
+// Use /data volume on Railway, local file otherwise
+const dbPath = existsSync("/data") ? "/data/sborbot.db" : "sborbot.db";
+const db = new Database(dbPath);
 db.pragma("journal_mode = WAL");
 
 // Schema versioning

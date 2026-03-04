@@ -55,6 +55,7 @@ setInterval(checkDeadlines, 60 * 60 * 1000);
 
 bot.start({
   allowed_updates: ["message", "callback_query", "chat_member"],
+  drop_pending_updates: true,
 });
 
 console.log("Bot started");
