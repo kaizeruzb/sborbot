@@ -3,10 +3,11 @@ import {
   upsertMember, deactivateMember, upsertGroup,
   getCollectionById, addPayment, getPayment, updatePaymentStatus,
   getActiveCollectionsForUser, getCollectionStatus, closeCollection,
+  deletePayment,
 } from "./db.js";
 import {
-  isAdmin, adminFlow, pendingRejects, handleAdminText,
-  sendReminder, doClose, formatMoney,
+  isAdmin, adminFlow, pendingRejects, pendingAmountEdit, handleAdminText,
+  sendReminder, doClose, formatMoney, buildPaymentListMessage,
 } from "./commands.js";
 
 // In-memory: userId -> collectionId they're about to send a screenshot for
@@ -69,7 +70,7 @@ export function registerHandlers(bot: Bot) {
     }
 
     if (isAdmin(ctx)) {
-      await ctx.reply("Привет! Команды:\n/newcollect — создать сбор\n/status — статус сборов\n/remind — напомнить\n/paid @user сумма — записать нал\n/close — закрыть сбор\n/history — история сборов\n/cancel — отменить действие");
+      await ctx.reply("Привет! Команды:\n/newcollect — создать сбор\n/status — статус сборов\n/payments — просмотр/удаление/изменение платежей\n/remind — напомнить\n/paid @user сумма — записать нал\n/close — закрыть сбор\n/history — история сборов\n/cancel — отменить действие");
     } else {
       await ctx.reply("Привет! Нажмите кнопку «Отправить скрин оплаты» в группе.");
     }
@@ -244,6 +245,53 @@ export function registerHandlers(bot: Bot) {
       if (!collection) return ctx.answerCallbackQuery({ text: "Сбор не найден" });
       await ctx.answerCallbackQuery();
       await doClose(ctx, collection);
+      return;
+    }
+
+    // Payment management callbacks
+    if (data.startsWith("pmt:")) {
+      if (!isAdmin(ctx)) return ctx.answerCallbackQuery({ text: "Нет доступа" });
+
+      // Show payment list for a collection
+      if (data.startsWith("pmt:col:")) {
+        const collectionId = parseInt(data.slice(8));
+        const { text, keyboard } = buildPaymentListMessage(collectionId);
+        await ctx.answerCallbackQuery();
+        await ctx.editMessageText(text, { reply_markup: keyboard });
+        return;
+      }
+
+      // Ask for delete confirmation
+      if (data.startsWith("pmt:del:")) {
+        const [paymentId, colId] = data.slice(8).split(":").map(Number);
+        const kb = new InlineKeyboard()
+          .text("✅ Да, удалить", `pmt:delok:${paymentId}:${colId}`)
+          .text("↩️ Отмена", `pmt:col:${colId}`);
+        await ctx.answerCallbackQuery();
+        await ctx.editMessageText("Удалить этот платёж?", { reply_markup: kb });
+        return;
+      }
+
+      // Confirm delete
+      if (data.startsWith("pmt:delok:")) {
+        const [paymentId, colId] = data.slice(10).split(":").map(Number);
+        deletePayment(paymentId);
+        const { text, keyboard } = buildPaymentListMessage(colId);
+        await ctx.answerCallbackQuery({ text: "Платёж удалён" });
+        await ctx.editMessageText(text, { reply_markup: keyboard });
+        return;
+      }
+
+      // Request new amount
+      if (data.startsWith("pmt:amt:")) {
+        const [paymentId, colId] = data.slice(8).split(":").map(Number);
+        pendingAmountEdit.set(ctx.from!.id, { paymentId, collectionId: colId });
+        await ctx.answerCallbackQuery();
+        await ctx.editMessageText("Введите новую сумму:");
+        return;
+      }
+
+      await ctx.answerCallbackQuery();
       return;
     }
 

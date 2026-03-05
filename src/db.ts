@@ -273,4 +273,32 @@ export function getClosedCollections() {
   return _getClosedCollections.all() as Collection[];
 }
 
+// --- Payment management ---
+
+const _getPaymentsForCollection = db.prepare(`
+  SELECT p.*, m.first_name, m.username
+  FROM payments p
+  LEFT JOIN members m ON m.user_id = p.user_id AND m.group_id = (
+    SELECT group_id FROM collections WHERE id = p.collection_id
+  )
+  WHERE p.collection_id = ? AND p.id = (
+    SELECT MAX(p2.id) FROM payments p2
+    WHERE p2.collection_id = p.collection_id AND p2.user_id = p.user_id
+  )
+  ORDER BY p.created_at
+`);
+export function getPaymentsForCollection(collectionId: number) {
+  return _getPaymentsForCollection.all(collectionId) as (Payment & { first_name: string; username: string | null })[];
+}
+
+const _deletePayment = db.prepare(`DELETE FROM payments WHERE id = ?`);
+export function deletePayment(paymentId: number) {
+  _deletePayment.run(paymentId);
+}
+
+const _updatePaymentAmount = db.prepare(`UPDATE payments SET amount = ? WHERE id = ?`);
+export function updatePaymentAmount(paymentId: number, amount: number) {
+  _updatePaymentAmount.run(amount, paymentId);
+}
+
 export { db };

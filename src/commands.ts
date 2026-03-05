@@ -3,7 +3,8 @@ import {
   createCollection, getActiveCollection, getActiveCollections, getCollectionById,
   getCollectionStatus, closeCollection, getGroups, getPayment,
   updatePaymentStatus, getClosedCollections, addPayment,
-  getMemberByUsername, getMemberByUserId, type Collection,
+  getMemberByUsername, getMemberByUserId, getPaymentsForCollection,
+  deletePayment, updatePaymentAmount, type Collection,
 } from "./db.js";
 
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "CPO_FIN";
@@ -29,6 +30,7 @@ type FlowState =
 
 export const adminFlow = new Map<number, FlowState>();
 export const pendingRejects = new Map<number, { collectionId: number; userId: number }>();
+export const pendingAmountEdit = new Map<number, { paymentId: number; collectionId: number }>();
 
 // --- Handle admin text in DM (state machine) ---
 
@@ -36,6 +38,27 @@ export async function handleAdminText(ctx: Context): Promise<boolean> {
   const adminId = ctx.from!.id;
   const text = ctx.message?.text?.trim();
   if (!text) return false;
+
+  // Priority 0: pending amount edit
+  if (pendingAmountEdit.has(adminId)) {
+    const { paymentId, collectionId } = pendingAmountEdit.get(adminId)!;
+    pendingAmountEdit.delete(adminId);
+
+    const amount = parseFloat(text.replace(/\s/g, "").replace(/,/g, "."));
+    if (isNaN(amount) || amount <= 0) {
+      await ctx.reply("Неверная сумма. Редактирование отменено.");
+      return true;
+    }
+
+    updatePaymentAmount(paymentId, amount);
+    const collection = getCollectionById(collectionId);
+    await ctx.reply(`✅ Сумма обновлена: ${formatMoney(amount)} (сбор "${collection?.title}")`);
+
+    // Show updated list
+    const { text: listText, keyboard } = buildPaymentListMessage(collectionId);
+    await ctx.reply(listText, { reply_markup: keyboard });
+    return true;
+  }
 
   // Priority 1: pending reject reason
   if (pendingRejects.has(adminId)) {
@@ -336,11 +359,18 @@ export async function handleClose(ctx: Context) {
 
 export async function doClose(ctx: Context, collection: Collection) {
   closeCollection(collection.id);
-  const { paid, pending, knownUnpaid, unknownUnpaidCount } = getCollectionStatus(collection.id);
-  await ctx.api.sendMessage(collection.group_id,
-    `Сбор "${collection.title}" закрыт.\n✅ Сдали: ${paid.length} | ⏳ На проверке: ${pending.length} | ❌ Не сдали: ~${knownUnpaid.length + unknownUnpaidCount}`,
-  );
-  await ctx.reply(`Сбор "${collection.title}" закрыт.`);
+  const { paid, pending, knownUnpaid, unknownUnpaidCount, collectedAmount } = getCollectionStatus(collection.id);
+  const totalUnpaid = knownUnpaid.length + unknownUnpaidCount;
+  const remaining = collection.total_amount - collectedAmount;
+
+  let groupMsg = `📊 Сбор "${collection.title}" закрыт.\n\n`;
+  groupMsg += `💰 Собрано: ${formatMoney(collectedAmount)} / ${formatMoney(collection.total_amount)}`;
+  if (remaining > 0) groupMsg += ` (не хватает: ${formatMoney(remaining)})`;
+  if (remaining <= 0) groupMsg += ` ✅`;
+  groupMsg += `\n✅ Сдали: ${paid.length} | ⏳ На проверке: ${pending.length} | ❌ Не сдали: ~${totalUnpaid}`;
+
+  await ctx.api.sendMessage(collection.group_id, groupMsg);
+  await ctx.reply(`Сбор "${collection.title}" закрыт.\n💰 ${formatMoney(collectedAmount)} / ${formatMoney(collection.total_amount)}`);
 }
 
 // --- /history ---
@@ -442,11 +472,60 @@ export async function handlePaid(ctx: Context) {
   }
 }
 
+// --- /payments ---
+
+export function buildPaymentListMessage(collectionId: number): { text: string; keyboard: InlineKeyboard } {
+  const collection = getCollectionById(collectionId);
+  const payments = getPaymentsForCollection(collectionId);
+  const kb = new InlineKeyboard();
+
+  let text = `💳 Платежи: "${collection?.title}"\n\n`;
+
+  if (payments.length === 0) {
+    text += "Платежей пока нет.";
+    return { text, keyboard: kb };
+  }
+
+  for (let i = 0; i < payments.length; i++) {
+    const p = payments[i];
+    const name = p.first_name || `#${p.user_id}`;
+    const uname = p.username ? ` (@${p.username})` : "";
+    const status = p.status === "confirmed" ? "✅" : p.status === "pending" ? "⏳" : "❌";
+    const date = p.created_at?.slice(0, 10) || "";
+    text += `${i + 1}. ${name}${uname} — ${formatMoney(p.amount)} ${status} — ${date}\n`;
+
+    kb.text(`❌ ${i + 1}`, `pmt:del:${p.id}:${collectionId}`)
+      .text(`✏️ ${i + 1}`, `pmt:amt:${p.id}:${collectionId}`)
+      .row();
+  }
+
+  return { text, keyboard: kb };
+}
+
+export async function handlePayments(ctx: Context) {
+  if (ctx.chat?.type !== "private" || !isAdmin(ctx)) return;
+
+  const collections = getActiveCollections();
+  if (collections.length === 0) return ctx.reply("Нет активных сборов.");
+
+  if (collections.length === 1) {
+    const { text, keyboard } = buildPaymentListMessage(collections[0].id);
+    return ctx.reply(text, { reply_markup: keyboard });
+  }
+
+  const kb = new InlineKeyboard();
+  for (const c of collections) {
+    kb.text(c.title, `pmt:col:${c.id}`).row();
+  }
+  await ctx.reply("Выберите сбор:", { reply_markup: kb });
+}
+
 // --- /cancel ---
 
 export async function handleCancel(ctx: Context) {
   if (ctx.chat?.type !== "private" || !isAdmin(ctx)) return;
   adminFlow.delete(ctx.from!.id);
   pendingRejects.delete(ctx.from!.id);
+  pendingAmountEdit.delete(ctx.from!.id);
   await ctx.reply("Действие отменено.");
 }

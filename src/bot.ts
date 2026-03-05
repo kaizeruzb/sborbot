@@ -2,7 +2,7 @@ import "dotenv/config";
 import { Bot, InlineKeyboard } from "grammy";
 import {
   handleNewCollect, handleStatus, handleRemind,
-  handleClose, handleCancel, handleHistory, handlePaid, formatMoney, buildStatusText,
+  handleClose, handleCancel, handleHistory, handlePaid, handlePayments, formatMoney, buildStatusText,
 } from "./commands.js";
 import { registerHandlers } from "./handlers.js";
 import { getActiveCollectionsWithDeadline, getActiveCollections, getCollectionStatus, closeCollection } from "./db.js";
@@ -34,6 +34,7 @@ bot.command("close", handleClose);
 bot.command("cancel", handleCancel);
 bot.command("history", handleHistory);
 bot.command("paid", handlePaid);
+bot.command("payments", handlePayments);
 
 // --- Hourly: deadline checks + auto-status in groups ---
 
@@ -48,10 +49,15 @@ async function hourlyTick() {
 
     if (hoursLeft < 0) {
       closeCollection(collection.id);
-      const { paid, pending, knownUnpaid, unknownUnpaidCount } = getCollectionStatus(collection.id);
-      bot.api.sendMessage(collection.group_id,
-        `⏰ Дедлайн сбора "${collection.title}" прошёл. Сбор закрыт.\n✅ ${paid.length} | ⏳ ${pending.length} | ❌ ~${knownUnpaid.length + unknownUnpaidCount}`,
-      ).catch(() => {});
+      const { paid, pending, knownUnpaid, unknownUnpaidCount, collectedAmount } = getCollectionStatus(collection.id);
+      const totalUnpaid = knownUnpaid.length + unknownUnpaidCount;
+      const remaining = collection.total_amount - collectedAmount;
+      let msg = `⏰ Дедлайн сбора "${collection.title}" прошёл. Сбор закрыт.\n\n`;
+      msg += `💰 Собрано: ${formatMoney(collectedAmount)} / ${formatMoney(collection.total_amount)}`;
+      if (remaining > 0) msg += ` (не хватает: ${formatMoney(remaining)})`;
+      if (remaining <= 0) msg += ` ✅`;
+      msg += `\n✅ ${paid.length} | ⏳ ${pending.length} | ❌ ~${totalUnpaid}`;
+      bot.api.sendMessage(collection.group_id, msg).catch(() => {});
     } else if (hoursLeft <= 24) {
       const { knownUnpaid, unknownUnpaidCount } = getCollectionStatus(collection.id);
       if (knownUnpaid.length + unknownUnpaidCount > 0) {
